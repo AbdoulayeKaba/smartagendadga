@@ -1,0 +1,796 @@
+// Plateforme DG — Réservation & planification de rendez-vous (MySQL)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum AppointmentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum Priority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum AppointmentType {
+  INTERNAL
+  EXTERNAL
+  MINISTRY
+  PERSONAL
+}
+
+enum NotificationKind {
+  REQUEST_CREATED
+  APPROVED
+  REJECTED
+  RESCHEDULED
+  REMINDER_24H
+  REMINDER_1H
+  MEETING_STARTED
+  MEETING_ENDED
+  MISSION_CREATED
+  MISSION_CANCELLED
+  MISSION_COMPLETED
+  MISSION_DEPART_TODAY
+  MISSION_RETURN_TODAY
+  MISSION_CLOSE_SUGGESTED
+  MISSION_EXTENDED
+  MISSION_REOPENED
+  MAIL_DEADLINE_SOON
+  MAIL_OVERDUE
+}
+
+enum MissionOperationalState {
+  NORMAL
+  PROLONGED
+  SHORTENED
+  CLOSED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String?  @map("password_hash")
+  microsoftId  String?  @unique @map("microsoft_id") @db.VarChar(191)
+  firstName    String   @map("first_name")
+  lastName     String   @map("last_name")
+  role         String   @default("MANAGER") @db.VarChar(64)
+  active            Boolean   @default(true)
+  archived          Boolean   @default(false)
+  archivedAt        DateTime? @map("archived_at")
+  department        String?   @db.VarChar(120)
+  phone             String?   @db.VarChar(40)
+  avatarUrl         String?   @map("avatar_url") @db.VarChar(500)
+  sessionVersion    Int       @default(0) @map("session_version")
+  passwordChangedAt DateTime? @map("password_changed_at")
+  mustChangePassword Boolean  @default(false) @map("must_change_password")
+  passwordResetToken     String?   @map("password_reset_token") @db.VarChar(64)
+  passwordResetExpiresAt DateTime? @map("password_reset_expires_at")
+  lastLoginAt       DateTime? @map("last_login_at")
+  twoFactorEnabled  Boolean   @default(false) @map("two_factor_enabled")
+  twoFactorSecret   String?   @map("two_factor_secret") @db.VarChar(64)
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  requestedAppointments Appointment[] @relation("RequestedBy")
+  reviewedAppointments  Appointment[] @relation("ReviewedBy")
+  reviewedRoomReservations RoomReservation[] @relation("RoomReservationReviewedBy")
+  participants          Participant[]
+  notifications       Notification[]
+  auditLogs             AuditLog[]
+  dgTasksCreated        DgTask[]              @relation("DgTaskCreatedBy")
+  dgProjectsCreated     DgProject[]           @relation("DgProjectCreatedBy")
+  dgDecisionsCreated    DgDecision[]          @relation("DgDecisionCreatedBy")
+  vaultDocuments        VaultDocument[]
+  missionHistory        DgMissionHistory[]
+  mailWorkflowEvents    MailWorkflowEvent[]
+  roomReservations      RoomReservation[]
+
+  @@map("users")
+}
+
+model Appointment {
+  id              String            @id @default(cuid())
+  title           String            @db.VarChar(191)
+  description     String?           @db.Text
+  startAt         DateTime          @map("start_at")
+  endAt           DateTime          @map("end_at")
+  status          AppointmentStatus @default(PENDING)
+  priority        Priority          @default(MEDIUM)
+  type            AppointmentType   @default(INTERNAL)
+  requestedById   String            @map("requested_by_id")
+  reviewedById    String?           @map("reviewed_by_id")
+  reviewedAt      DateTime?         @map("reviewed_at")
+  rejectionReason String?           @map("rejection_reason") @db.VarChar(500)
+  outlookEventId  String?           @map("outlook_event_id") @db.VarChar(191)
+  isOnlineMeeting Boolean           @default(false) @map("is_online_meeting")
+  teamsMeetingUrl String?           @map("teams_meeting_url") @db.VarChar(500)
+  teamsMeetingId  String?           @map("teams_meeting_id") @db.VarChar(191)
+  urgentOverride  Boolean           @default(false) @map("urgent_override")
+  location        String?           @db.VarChar(255)
+  timezone        String            @default("Africa/Conakry") @db.VarChar(64)
+  allDay          Boolean           @default(false) @map("all_day")
+  reminderMinutesBefore Int?        @map("reminder_minutes_before")
+  strategicContactId  String?     @map("strategic_contact_id")
+  archived            Boolean     @default(false)
+  archivedAt          DateTime?   @map("archived_at")
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+
+  requestedBy        User              @relation("RequestedBy", fields: [requestedById], references: [id], onDelete: Cascade)
+  reviewedBy         User?             @relation("ReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  strategicContact   StrategicContact? @relation(fields: [strategicContactId], references: [id], onDelete: SetNull)
+  participants       Participant[]
+  notifications      Notification[]
+  auditLogs          AuditLog[]
+  roomReservations   RoomReservation[]
+
+  @@index([status, startAt])
+  @@index([startAt, endAt])
+  @@index([requestedById])
+  @@index([strategicContactId])
+  @@index([archived, archivedAt])
+  @@map("appointments")
+}
+
+enum RoomReservationStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+  CANCELLED
+}
+
+/** Origine de la demande de salle. */
+enum RoomBookingOrigin {
+  /** Réservation depuis un créneau (disponibilités salles). */
+  SLOT
+  /** Réservation liée à une demande de rendez-vous. */
+  APPOINTMENT
+}
+
+enum RoomUsageType {
+  REUNION
+  COMITE
+  FORMATION
+  ENTRETIEN
+  AUTRE
+}
+
+/// Réservation de salle (distincte des rendez-vous DG).
+model RoomReservation {
+  id                String                @id @default(cuid())
+  roomId            String                @map("room_id") @db.VarChar(64)
+  roomName          String                @map("room_name") @db.VarChar(200)
+  title             String                @db.VarChar(191)
+  usageType         RoomUsageType         @default(REUNION) @map("usage_type")
+  organizerService  String                @map("organizer_service") @db.VarChar(120)
+  participantCount  Int?                  @map("participant_count")
+  equipment         Json?
+  logisticsNotes    String?               @map("logistics_notes") @db.Text
+  contactPhone      String?               @map("contact_phone") @db.VarChar(32)
+  contactEmail      String?               @map("contact_email") @db.VarChar(191)
+  startAt           DateTime              @map("start_at")
+  endAt             DateTime              @map("end_at")
+  status            RoomReservationStatus @default(PENDING)
+  bookedById        String                @map("booked_by_id")
+  reviewedById      String?               @map("reviewed_by_id")
+  reviewedAt        DateTime?             @map("reviewed_at")
+  rejectionReason   String?               @map("rejection_reason") @db.VarChar(500)
+  assistantNote     String?               @map("assistant_note") @db.VarChar(500)
+  /** Créneau salles vs demande de rendez-vous. */
+  bookingOrigin     RoomBookingOrigin     @default(SLOT) @map("booking_origin")
+  /** RDV source si bookingOrigin = APPOINTMENT. */
+  appointmentId     String?               @map("appointment_id")
+  archived          Boolean               @default(false)
+  archivedAt        DateTime?             @map("archived_at")
+  createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @updatedAt @map("updated_at")
+
+  bookedBy     User          @relation(fields: [bookedById], references: [id], onDelete: Cascade)
+  reviewedBy   User?         @relation("RoomReservationReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  appointment  Appointment?  @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  @@index([roomId, startAt])
+  @@index([startAt, endAt])
+  @@index([status])
+  @@index([archived, archivedAt])
+  @@index([bookingOrigin])
+  @@index([appointmentId])
+  @@map("room_reservations")
+}
+
+model Participant {
+  id            String   @id @default(cuid())
+  appointmentId String   @map("appointment_id")
+  userId        String?  @map("user_id")
+  email         String   @db.VarChar(191)
+  name          String   @db.VarChar(191)
+  isExternal    Boolean  @default(false) @map("is_external")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  user        User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([appointmentId])
+  @@map("participants")
+}
+
+model Notification {
+  id            String           @id @default(cuid())
+  userId        String           @map("user_id")
+  appointmentId String?          @map("appointment_id")
+  kind          NotificationKind
+  title         String           @db.VarChar(191)
+  message       String           @db.VarChar(1000)
+  recipientEmail String?         @map("recipient_email") @db.VarChar(191)
+  emailSent     Boolean          @default(false) @map("email_sent")
+  scheduledFor  DateTime?        @map("scheduled_for")
+  sentAt        DateTime?        @map("sent_at")
+  createdAt     DateTime         @default(now()) @map("created_at")
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([scheduledFor, emailSent])
+  @@map("dg_notifications")
+}
+
+model AuditLog {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  appointmentId String?  @map("appointment_id")
+  action        String   @db.VarChar(120)
+  meta          Json?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([appointmentId])
+  @@map("dg_audit_logs")
+}
+
+model PlatformSetting {
+  key         String   @id @db.VarChar(64)
+  value       String   @db.LongText
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  updatedById String?  @map("updated_by_id")
+
+  @@map("platform_settings")
+}
+
+/// Référentiels configurables (jours fériés, indispos, types RDV, lieux, motifs).
+model ReferentialItem {
+  id         String   @id @default(cuid())
+  categoryId String   @map("category_id") @db.VarChar(32)
+  name       String   @db.VarChar(200)
+  value      String?  @db.VarChar(64)
+  meta       Json?
+  archived   Boolean  @default(false)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([categoryId, archived])
+  @@map("dg_referential_items")
+}
+
+// ——— Espace de travail assistante DG ———
+
+enum DgTaskStatus {
+  PENDING
+  IN_PROGRESS
+  SUSPENDED
+  COMPLETED
+  CANCELLED
+}
+
+enum DgProjectStatus {
+  PLANNED
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum DgDecisionStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+  OVERDUE
+  CLOSED
+}
+
+enum MailDirection {
+  INCOMING
+  OUTGOING
+}
+
+enum MailWorkflowStatus {
+  RECEIVED
+  ASSIGNED
+  IN_PROGRESS
+  PROCESSED
+  ARCHIVED
+  SENT
+}
+
+enum MailPriority {
+  URGENT
+  NORMAL
+}
+
+enum MailKind {
+  DEPARTURE
+  VAULT
+}
+
+enum ContactCategory {
+  MINISTRY
+  INSTITUTION
+  PARTNER
+  SUPPLIER
+  EMBASSY
+  INTERNATIONAL_ORG
+  OTHER
+}
+
+enum InvitationStatus {
+  RECEIVED
+  ACCEPTED
+  REFUSED
+  DELEGATED
+  PENDING
+}
+
+enum MissionStatus {
+  PLANNED
+  ONGOING
+  COMPLETED
+  CANCELLED
+}
+
+enum HotelReservationStatus {
+  TO_BOOK
+  BOOKING_IN_PROGRESS
+  BOOKED
+  CONFIRMED
+  CANCELLED
+}
+
+enum HotelReservationAttachmentType {
+  RECEIPT
+  OTHER
+}
+
+enum DeadlineKind {
+  CONTRACT
+  RENEWAL
+  REPORT
+  AUDIT
+  PERIODIC_MEETING
+  OTHER
+}
+
+enum DeadlineStatus {
+  UPCOMING
+  DUE_SOON
+  OVERDUE
+  COMPLETED
+}
+
+enum DocumentCategory {
+  CONTRACT
+  MAIL
+  DECISION
+  REPORT
+  MINUTES
+  OTHER
+}
+
+model DgProject {
+  id          String          @id @default(cuid())
+  name        String          @db.VarChar(200)
+  description String?         @db.Text
+  status      DgProjectStatus @default(ACTIVE)
+  ownerName   String          @map("owner_name") @db.VarChar(120)
+  ownerUserId String?         @map("owner_user_id")
+  phases      String?         @db.VarChar(500)
+  startAt     DateTime?       @map("start_at")
+  dueAt       DateTime?       @map("due_at")
+  createdById String          @map("created_by_id")
+  createdAt   DateTime        @default(now()) @map("created_at")
+  updatedAt   DateTime        @updatedAt @map("updated_at")
+
+  createdBy User     @relation("DgProjectCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  tasks     DgTask[]
+
+  @@index([status])
+  @@map("dg_projects")
+}
+
+model DgTask {
+  id              String       @id @default(cuid())
+  title           String       @db.VarChar(200)
+  description     String?      @db.Text
+  status          DgTaskStatus @default(PENDING)
+  priority        Priority     @default(MEDIUM)
+  projectId       String?      @map("project_id")
+  projectName     String?      @map("project_name") @db.VarChar(200)
+  projectPhase    String?      @map("project_phase") @db.VarChar(120)
+  assigneeName    String       @map("assignee_name") @db.VarChar(120)
+  assigneeUserId  String?      @map("assignee_user_id")
+  startAt         DateTime?    @map("start_at")
+  dueAt           DateTime?    @map("due_at")
+  estimatedHours  Int?         @map("estimated_hours")
+  createdById     String       @map("created_by_id")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  project     DgProject?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  createdBy   User                @relation("DgTaskCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  comments    DgTaskComment[]
+  attachments DgTaskAttachment[]
+  history     DgTaskHistory[]
+
+  @@index([status, dueAt])
+  @@index([projectId])
+  @@map("dg_tasks")
+}
+
+model DgTaskComment {
+  id         String   @id @default(cuid())
+  taskId     String   @map("task_id")
+  authorId   String   @map("author_id")
+  authorName String   @map("author_name") @db.VarChar(120)
+  body       String   @db.Text
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  task DgTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@map("dg_task_comments")
+}
+
+model DgTaskAttachment {
+  id         String   @id @default(cuid())
+  taskId     String   @map("task_id")
+  fileName   String   @map("file_name") @db.VarChar(255)
+  fileSize   Int      @map("file_size")
+  mimeType   String   @map("mime_type") @db.VarChar(120)
+  storageKey String   @map("storage_key") @db.VarChar(500)
+  uploadedAt DateTime @default(now()) @map("uploaded_at")
+
+  task DgTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@map("dg_task_attachments")
+}
+
+model DgTaskHistory {
+  id        String   @id @default(cuid())
+  taskId    String   @map("task_id")
+  userId    String   @map("user_id")
+  userName  String   @map("user_name") @db.VarChar(120)
+  action    String   @db.VarChar(80)
+  detail    String?  @db.VarChar(500)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  task DgTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, createdAt])
+  @@map("dg_task_history")
+}
+
+model DgDecision {
+  id            String           @id @default(cuid())
+  title         String           @db.VarChar(200)
+  context       String?          @db.Text
+  decisionText  String           @map("decision_text") @db.Text
+  status        DgDecisionStatus @default(NOT_STARTED)
+  priority      Priority         @default(MEDIUM)
+  ownerName     String           @map("owner_name") @db.VarChar(120)
+  ownerUserId   String?          @map("owner_user_id")
+  appointmentId String?          @map("appointment_id")
+  dueAt         DateTime?        @map("due_at")
+  meetingDate   DateTime?        @map("meeting_date")
+  createdById   String           @map("created_by_id")
+  createdAt     DateTime         @default(now()) @map("created_at")
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+
+  createdBy User @relation("DgDecisionCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([status, dueAt])
+  @@map("dg_decisions")
+}
+
+model MailRecord {
+  id                  String             @id @default(cuid())
+  direction           MailDirection
+  mailKind            MailKind           @default(DEPARTURE) @map("mail_kind")
+  registrationNumber  Int?               @map("registration_number")
+  reference           String             @db.VarChar(80)
+  counterpart         String             @db.VarChar(200)
+  subject             String             @db.VarChar(300)
+  mailDate            DateTime           @map("mail_date")
+  priority            MailPriority       @default(NORMAL)
+  workflowStatus      MailWorkflowStatus @default(RECEIVED) @map("workflow_status")
+  origin              String?            @db.VarChar(200)
+  dgaInstruction      String?            @map("dga_instruction") @db.VarChar(120)
+  executor            String?            @db.VarChar(120)
+  action              String?            @db.VarChar(200)
+  scSentAt            DateTime?          @map("sc_sent_at")
+  executionDeadline   DateTime?          @map("execution_deadline")
+  followUp            String?            @map("follow_up") @db.Text
+  courierName         String?            @map("courier_name") @db.VarChar(120)
+  assignedService     String?            @map("assigned_service") @db.VarChar(120)
+  assignedAt          DateTime?          @map("assigned_at")
+  attachmentCount     Int                @default(0) @map("attachment_count")
+  notes               String?            @db.Text
+  archived            Boolean            @default(false)
+  archivedAt          DateTime?          @map("archived_at")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  updatedAt           DateTime           @updatedAt @map("updated_at")
+
+  attachments     DgMailAttachment[]
+  workflowEvents  MailWorkflowEvent[]
+
+  @@index([direction, workflowStatus])
+  @@index([mailKind, archived])
+  @@index([reference])
+  @@index([archived, archivedAt])
+  @@map("dg_mail_records")
+}
+
+model MailWorkflowEvent {
+  id         String             @id @default(cuid())
+  mailId     String             @map("mail_id")
+  status     MailWorkflowStatus
+  fromStatus MailWorkflowStatus? @map("from_status")
+  userId     String?            @map("user_id")
+  createdAt  DateTime           @default(now()) @map("created_at")
+
+  mail MailRecord @relation(fields: [mailId], references: [id], onDelete: Cascade)
+  user User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([mailId, createdAt])
+  @@map("dg_mail_workflow_events")
+}
+
+model DgMailAttachment {
+  id         String   @id @default(cuid())
+  mailId     String   @map("mail_id")
+  fileName   String   @map("file_name") @db.VarChar(255)
+  fileSize   Int      @map("file_size")
+  mimeType   String   @map("mime_type") @db.VarChar(120)
+  storageKey String   @map("storage_key") @db.VarChar(500)
+  uploadedAt DateTime @default(now()) @map("uploaded_at")
+
+  mail MailRecord @relation(fields: [mailId], references: [id], onDelete: Cascade)
+
+  @@index([mailId])
+  @@map("dg_mail_attachments")
+}
+
+model StrategicContact {
+  id                String          @id @default(cuid())
+  category          ContactCategory
+  fullName          String          @map("full_name") @db.VarChar(120)
+  jobTitle          String?         @map("job_title") @db.VarChar(120)
+  organization      String          @db.VarChar(200)
+  phone             String?         @db.VarChar(40)
+  email             String?         @db.VarChar(191)
+  notes             String?         @db.Text
+  interactionCount  Int             @default(0) @map("interaction_count")
+  appointmentCount  Int             @default(0) @map("appointment_count")
+  archived          Boolean         @default(false)
+  archivedAt        DateTime?       @map("archived_at")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+
+  appointments Appointment[]
+
+  @@index([category, fullName])
+  @@index([archived, archivedAt])
+  @@map("dg_strategic_contacts")
+}
+
+model AudienceRecord {
+  id            String    @id @default(cuid())
+  heldAt        DateTime  @map("held_at")
+  endAt         DateTime? @map("end_at")
+  participants  String    @db.VarChar(500)
+  subject       String    @db.VarChar(300)
+  outcome       String?   @db.Text
+  minutes       String?   @db.Text
+  appointmentId String?   @map("appointment_id")
+  archived      Boolean   @default(false)
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  @@index([heldAt])
+  @@map("dg_audience_records")
+}
+
+model OfficialInvitation {
+  id           String           @id @default(cuid())
+  organizer    String           @db.VarChar(200)
+  eventTitle   String           @map("event_title") @db.VarChar(300)
+  eventDate    DateTime         @map("event_date")
+  location     String?          @db.VarChar(300)
+  importance   Priority         @default(MEDIUM)
+  status       InvitationStatus @default(RECEIVED)
+  delegateName String?          @map("delegate_name") @db.VarChar(120)
+  notes        String?          @db.Text
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+
+  @@index([eventDate, status])
+  @@map("dg_official_invitations")
+}
+
+model DgMission {
+  id                     String        @id @default(cuid())
+  subject                String        @db.VarChar(300)
+  missionType            String        @default("Mission officielle") @map("mission_type") @db.VarChar(120)
+  destination            String        @db.VarChar(500)
+  destinations           Json          @default("[]")
+  details                String?       @db.Text
+  departAt               DateTime      @map("depart_at")
+  returnAt               DateTime      @map("return_at")
+  initialReturnAt        DateTime?     @map("initial_return_at")
+  operationalState       MissionOperationalState @default(NORMAL) @map("operational_state")
+  prolongationCount      Int           @default(0) @map("prolongation_count")
+  status                 MissionStatus @default(PLANNED)
+  participants           String        @db.VarChar(500)
+  documentCount          Int           @default(0) @map("document_count")
+  observations           String?       @db.Text
+  cancelReason           String?       @map("cancel_reason") @db.VarChar(120)
+  cancelReasonDetail     String?       @map("cancel_reason_detail") @db.Text
+  closureReport          String?       @map("closure_report") @db.Text
+  closureResults         String?       @map("closure_results") @db.Text
+  closureRecommendations String?       @map("closure_recommendations") @db.Text
+  closureComments        String?       @map("closure_comments") @db.Text
+  completedAt            DateTime?     @map("completed_at")
+  statusChangedAt        DateTime?     @map("status_changed_at")
+  archived               Boolean       @default(false)
+  archivedAt             DateTime?     @map("archived_at")
+  createdAt              DateTime      @default(now()) @map("created_at")
+  updatedAt              DateTime      @updatedAt @map("updated_at")
+
+  hotelReservations DgMissionHotelReservation[]
+  history           DgMissionHistory[]
+  documents         DgMissionDocument[]
+
+  @@index([departAt, status])
+  @@index([archived, archivedAt])
+  @@map("dg_missions")
+}
+
+model DgMissionHistory {
+  id        String   @id @default(cuid())
+  missionId String   @map("mission_id")
+  userId    String   @map("user_id")
+  userName  String   @map("user_name") @db.VarChar(120)
+  action    String   @db.VarChar(80)
+  fieldName String?  @map("field_name") @db.VarChar(80)
+  oldValue  String?  @map("old_value") @db.Text
+  newValue  String?  @map("new_value") @db.Text
+  detail    String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  mission DgMission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  user    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([missionId, createdAt])
+  @@map("dg_mission_history")
+}
+
+enum MissionDocumentType {
+  GENERAL
+  REPORT
+}
+
+model DgMissionDocument {
+  id           String              @id @default(cuid())
+  missionId    String              @map("mission_id")
+  documentType MissionDocumentType @default(GENERAL) @map("document_type")
+  fileName     String              @map("file_name") @db.VarChar(255)
+  fileSize     Int                 @map("file_size")
+  mimeType     String              @map("mime_type") @db.VarChar(120)
+  storageKey   String              @map("storage_key") @db.VarChar(500)
+  uploadedAt   DateTime            @default(now()) @map("uploaded_at")
+
+  mission DgMission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+
+  @@index([missionId])
+  @@map("dg_mission_documents")
+}
+
+model DgMissionHotelReservation {
+  id            String                 @id @default(cuid())
+  missionId     String                 @map("mission_id")
+  hotel         String                 @db.VarChar(200)
+  address       String?                @db.VarChar(300)
+  city          String                 @db.VarChar(120)
+  country       String                 @db.VarChar(120)
+  contact       String?                @db.VarChar(200)
+  roomCount     Int                    @map("room_count")
+  roomType      String?                @map("room_type") @db.VarChar(120)
+  arrivalDate   DateTime               @map("arrival_date")
+  departureDate DateTime               @map("departure_date")
+  cost          Float?
+  currency      String                 @default("XOF") @db.VarChar(3)
+  status        HotelReservationStatus @default(BOOKED)
+  createdAt     DateTime               @default(now()) @map("created_at")
+  updatedAt     DateTime               @updatedAt @map("updated_at")
+
+  mission     DgMission                            @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  attachments DgMissionHotelReservationAttachment[]
+
+  @@index([missionId, status])
+  @@map("dg_mission_hotel_reservations")
+}
+
+model DgMissionHotelReservationAttachment {
+  id             String                       @id @default(cuid())
+  reservationId  String                       @map("reservation_id")
+  attachmentType HotelReservationAttachmentType @map("attachment_type")
+  fileName       String                       @map("file_name") @db.VarChar(255)
+  fileSize       Int                          @map("file_size")
+  mimeType       String                       @map("mime_type") @db.VarChar(120)
+  storageKey     String                       @map("storage_key") @db.VarChar(500)
+  uploadedAt     DateTime                     @default(now()) @map("uploaded_at")
+
+  reservation DgMissionHotelReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  @@index([reservationId])
+  @@map("dg_mission_hotel_reservation_attachments")
+}
+
+model ImportantDeadline {
+  id              String         @id @default(cuid())
+  title           String         @db.VarChar(200)
+  kind            DeadlineKind
+  status          DeadlineStatus @default(UPCOMING)
+  dueAt           DateTime       @map("due_at")
+  ownerName       String         @map("owner_name") @db.VarChar(120)
+  description     String?        @db.Text
+  alertDaysBefore Int            @default(7) @map("alert_days_before")
+  createdAt       DateTime       @default(now()) @map("created_at")
+
+  @@index([dueAt, status])
+  @@map("dg_important_deadlines")
+}
+
+model VaultDocument {
+  id           String           @id @default(cuid())
+  title        String           @db.VarChar(200)
+  category     DocumentCategory
+  version      Int              @default(1)
+  fileName     String           @map("file_name") @db.VarChar(255)
+  fileSize     Int              @map("file_size")
+  storageKey   String           @map("storage_key") @db.VarChar(500)
+  reportDate   DateTime         @map("report_date")
+  bodyHtml     String?          @map("body_html") @db.LongText
+  tags         Json             @default("[]")
+  restricted   Boolean          @default(false)
+  archived     Boolean          @default(false)
+  archivedAt   DateTime?        @map("archived_at")
+  uploadedById String           @map("uploaded_by_id")
+  uploadedAt   DateTime         @default(now()) @map("uploaded_at")
+
+  uploadedBy User @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
+
+  @@index([category, archived, reportDate])
+  @@map("dg_vault_documents")
+}

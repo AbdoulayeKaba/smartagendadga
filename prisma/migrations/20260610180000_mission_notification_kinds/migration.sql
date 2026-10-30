@@ -1,0 +1,14 @@
+-- Notification kinds for mission daily alerts
+ALTER TABLE `dg_notifications` MODIFY `kind` ENUM(
+  'REQUEST_CREATED',
+  'APPROVED',
+  'REJECTED',
+  'RESCHEDULED',
+  'REMINDER_24H',
+  'REMINDER_1H',
+  'MISSION_CANCELLED',
+  'MISSION_COMPLETED',
+  'MISSION_DEPART_TODAY',
+  'MISSION_RETURN_TODAY',
+  'MISSION_CLOSE_SUGGESTED'
+) NOT NULL;
